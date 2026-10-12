@@ -1,0 +1,6 @@
+data/
+__pycache__/
+*.pyc
+*.deb
+.DS_Store
+config.local.json
