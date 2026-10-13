@@ -44,7 +44,7 @@ DEFAULT_AI_PROVIDERS = {
     "claude":   {"cmd": ["claude", "-p", "{prompt}"], "continue_flag": "--continue"},
     "codex":    {"cmd": ["codex", "exec", "{prompt}"]},
     "kimicode": {"cmd": ["kimicode", "-p", "{prompt}"]},
-    "opencode": {"cmd": ["/home/xyw/.opencode/bin/opencode", "run", "--model", "{model}", "{prompt}"], "continue_flag": "--continue", "model": "opencode/nemotron-3-ultra-free"},
+    "opencode": {"cmd": ["/home/xyw/.opencode/bin/opencode", "run", "--model", "{model}", "{prompt}"], "continue_flag": "--continue", "model": "opencode/nemotron-3-ultra-free", "variant_flag": "--variant"},
     "openai":   {"type": "api", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini"},
 }
 AI_DEFAULT_PROVIDER = "zcode"
@@ -71,7 +71,12 @@ def load_ai_config():
 
 
 def save_ai_config(cfg):
-    AI_CONFIG_FILE.write_text(jsonlib.dumps(cfg, ensure_ascii=False, indent=2))
+    out = {"provider": cfg["provider"], "providers": {}}
+    for k, v in cfg["providers"].items():
+        diff = {kk: vv for kk, vv in v.items() if DEFAULT_AI_PROVIDERS.get(k, {}).get(kk) != vv}
+        if diff:
+            out["providers"][k] = diff
+    AI_CONFIG_FILE.write_text(jsonlib.dumps(out, ensure_ascii=False, indent=2))
 
 
 def save_ai_provider(provider):
@@ -386,6 +391,8 @@ async def chat(body: dict):
     if conf.get("model"):
         cmd_template = [part.replace("{model}", conf["model"]) for part in cmd_template]
     cmd = [str(part).replace("{prompt}", prompt) for part in cmd_template]
+    if conf.get("variant") and conf.get("variant_flag"):
+        cmd += [conf["variant_flag"], conf["variant"]]
     sessions = load_sessions()
 
     # 无附加旗标的 harness(如 opencode):把论文复制进会话目录,避免外部目录权限拒绝
@@ -482,6 +489,32 @@ def chat_reset(body: dict):
 def ai_providers():
     cfg = load_ai_config()
     return {"current": cfg["provider"], "providers": list(cfg["providers"].keys())}
+
+
+@app.get("/api/ai/variant")
+def get_ai_variant():
+    cfg = load_ai_config()
+    prov = cfg["provider"]
+    return {"provider": prov, "variant": cfg["providers"][prov].get("variant", "")}
+
+
+@app.post("/api/ai/variant")
+def set_ai_variant(body: dict):
+    variant = (body or {}).get("variant", "").strip()
+    cfg = load_ai_config()
+    prov = cfg["provider"]
+    if not conf_supports_variant(cfg, prov):
+        raise HTTPException(400, f"harness {prov} 不支持推理强度设置")
+    if variant:
+        cfg["providers"][prov]["variant"] = variant
+    else:
+        cfg["providers"][prov].pop("variant", None)
+    save_ai_config(cfg)
+    return {"ok": True, "provider": prov, "variant": variant}
+
+
+def conf_supports_variant(cfg, prov):
+    return bool(cfg["providers"][prov].get("variant_flag"))
 
 
 @app.get("/api/ai/model")

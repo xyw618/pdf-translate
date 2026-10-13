@@ -51,6 +51,13 @@
         <span class="chat-head-right">
           <select id="ai-provider" class="ai-provider" title="选择 AI harness"></select>
           <input id="ai-model" class="ai-model" title="模型(回车保存)" placeholder="模型">
+          <select id="ai-variant" class="ai-provider" title="推理强度(空 = 模型默认)">
+            <option value="">推理:默认</option>
+            <option value="minimal">推理:minimal</option>
+            <option value="low">推理:low</option>
+            <option value="high">推理:high</option>
+            <option value="max">推理:max</option>
+          </select>
           <button id="chat-clear" title="清空当前论文的对话">🧹</button>
           <button id="chat-close">✕</button>
         </span>

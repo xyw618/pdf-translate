@@ -734,10 +734,24 @@ async function loadProviders() {
     sel.onchange = async () => {
       await fetch("/api/ai/provider", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: sel.value }) });
       await loadModel();
+      await loadVariant();
     };
     await loadModel();
+    await loadVariant();
   } catch {}
 }
+
+async function loadVariant() {
+  const sel = $("#ai-variant");
+  try {
+    const d = await (await fetch("/api/ai/variant")).json();
+    sel.value = d.variant || "";
+  } catch { sel.value = ""; }
+}
+
+$("#ai-variant").addEventListener("change", async (e) => {
+  await fetch("/api/ai/variant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ variant: e.target.value }) });
+});
 
 async function loadModel() {
   const inp = $("#ai-model");
