@@ -48,8 +48,11 @@
       <div id="chat-resize" title="拖动调整高度 · 双击恢复默认"></div>
       <div class="chat-head">
         <span>🤖 AI 问答 <em id="chat-ctx"></em></span>
-        <button id="chat-clear" title="清空当前论文的对话">🧹</button>
-        <button id="chat-close">✕</button>
+        <span class="chat-head-right">
+          <select id="ai-provider" class="ai-provider" title="选择 AI harness"></select>
+          <button id="chat-clear" title="清空当前论文的对话">🧹</button>
+          <button id="chat-close">✕</button>
+        </span>
       </div>
       <div id="chat-msgs"></div>
       <div class="chat-input">

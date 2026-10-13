@@ -2,6 +2,7 @@ import asyncio
 import json as jsonlib
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -28,10 +29,64 @@ LLAMA_URL = f"{LLM_BASE}/v1/chat/completions"
 HEALTH_URL = f"{LLM_BASE}/health"
 BABELDOC = os.environ.get("PT_BABELDOC", "babeldoc")
 ZCODE = os.environ.get("PT_ZCODE", "zcode")
-TRANSLATE_MODEL = os.environ.get("PT_TRANSLATE_MODEL", "translate-model")
+TRANSLATE_MODEL = os.environ.get("PT_TRANSLATE_MODEL", "Hy-MT2-7B")
 TRANSLATE_TIMEOUT = 180
 TASK_TIMEOUT = 3600
 CHAT_TIMEOUT = 240
+
+# ---------- AI 问答 harness 配置 ----------
+# CLI 类:cmd 模板中 {prompt} 会被替换为问题;continue_flag 为续接会话的旗标;
+#         attach_flag 非空表示支持以该旗标附加论文 PDF,为空则改为在 prompt 中提示文件路径。
+# API 类:type=api,OpenAI 兼容 chat/completions,无会话(前端拼接历史),不支持论文附件。
+AI_CONFIG_FILE = DATA / "ai-config.json"
+DEFAULT_AI_PROVIDERS = {
+    "zcode":    {"cmd": ["zcode", "-p", "{prompt}"], "json_flag": "--json", "attach_flag": "--attach"},
+    "claude":   {"cmd": ["claude", "-p", "{prompt}"], "continue_flag": "--continue"},
+    "codex":    {"cmd": ["codex", "exec", "{prompt}"]},
+    "kimicode": {"cmd": ["kimicode", "-p", "{prompt}"]},
+    "opencode": {"cmd": ["/home/xyw/.opencode/bin/opencode", "run", "--model", "opencode/nemotron-3-ultra-free", "{prompt}"], "continue_flag": "--continue"},
+    "openai":   {"type": "api", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini"},
+}
+AI_DEFAULT_PROVIDER = "zcode"
+
+
+def load_ai_config():
+    cfg = {"provider": AI_DEFAULT_PROVIDER, "providers": dict(DEFAULT_AI_PROVIDERS)}
+    if AI_CONFIG_FILE.is_file():
+        try:
+            saved = jsonlib.loads(AI_CONFIG_FILE.read_text())
+            if saved.get("provider"):
+                cfg["provider"] = saved["provider"]
+            if isinstance(saved.get("providers"), dict):
+                cfg["providers"].update(saved["providers"])
+        except Exception:
+            pass
+    if cfg["provider"] not in cfg["providers"]:
+        cfg["provider"] = AI_DEFAULT_PROVIDER
+    return cfg
+
+
+def save_ai_provider(provider):
+    cfg = load_ai_config()
+    cfg["provider"] = provider
+    AI_CONFIG_FILE.write_text(jsonlib.dumps({"provider": cfg["provider"]}, ensure_ascii=False, indent=2))
+
+
+# ---------- 会话 ID 映射(对话 key -> AI CLI sessionId) ----------
+SESSIONS_FILE = Path.home() / ".cache" / "pdf-translate-chat" / "sessions.json"
+
+
+def load_sessions():
+    try:
+        d = jsonlib.loads(SESSIONS_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_sessions(d):
+    SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSIONS_FILE.write_text(jsonlib.dumps(d, ensure_ascii=False, indent=2))
 
 app = FastAPI()
 tasks = {}
@@ -268,43 +323,164 @@ async def chat(body: dict):
     if len(question) > 8000:
         question = question[:8000]
 
-    # ZCode 会话链:每个对话 key 一个专属目录,首轮建会话,后续 -c 恢复上下文
     key = tid or "global"
     chat_dir = Path.home() / ".cache" / "pdf-translate-chat" / f"chat-{key}"
     chat_dir.mkdir(parents=True, exist_ok=True)
-    prompt = question
 
-    cmd = [ZCODE, "-p", prompt, "--mode", "plan", "--cwd", str(chat_dir)]
-    if cont:
-        cmd.append("-c")
+    ai_cfg = load_ai_config()
+    provider = ai_cfg["provider"]
+    conf = dict(ai_cfg["providers"][provider])
+    ptype = conf.pop("type", "cli")
     attach = UPLOADS / f"{tid}.pdf" if tid else None
-    if tid and attach.is_file() and not cont:
-        cmd += ["--attach", str(attach)]
+    attach_ok = bool(tid and attach.is_file())
+
+    # opencode:写入项目级权限配置,非交互模式才能使用工具(读文件/跑命令)
+    if provider == "opencode":
+        pc = chat_dir / "opencode.json"
+        if not pc.is_file():
+            pc.write_text(jsonlib.dumps({
+                "permission": {"bash": "allow", "edit": "allow", "webfetch": "allow", "external_directory": "allow"}
+            }, ensure_ascii=False))
+
+    # ---- OpenAI 兼容 API:无会话,历史由前端拼接;不支持论文附件 ----
+    if ptype == "api":
+        history = [h for h in (body.get("history") or [])[-10:] if h.get("content")]
+        messages = [{"role": h.get("role", "user"), "content": str(h["content"])[:4000]} for h in history]
+        messages.append({"role": "user", "content": question})
+        req = jsonlib.dumps({"model": conf.get("model", "gpt-4o-mini"), "messages": messages}).encode()
+        rq = urllib.request.Request(
+            conf["base_url"].rstrip("/") + "/chat/completions",
+            data=req,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + conf.get("api_key", "")},
+        )
+        try:
+            with urllib.request.urlopen(rq, timeout=CHAT_TIMEOUT) as resp:
+                data = jsonlib.loads(resp.read())
+        except Exception as e:
+            raise HTTPException(502, f"AI API 调用失败: {e}")
+        try:
+            answer = data["choices"][0]["message"]["content"].strip()
+        except Exception:
+            raise HTTPException(502, "AI API 返回格式异常")
+        if not answer:
+            raise HTTPException(502, "AI 未返回内容")
+        return {"answer": answer, "attached": False, "provider": provider}
+
+    # ---- CLI harness(ZCode / Claude Code / Codex / Kimi Code …)----
+    cmd_template = conf.get("cmd")
+    if not cmd_template:
+        raise HTTPException(500, f"harness {provider} 缺少 cmd 配置")
+    prompt = question
+    if attach_ok and not cont and not conf.get("attach_flag"):
+        # 无附加旗标的 harness:告知论文路径,由其自行读取(需具备文件读取能力)
+        prompt += f"\n\n[参考资料:论文 PDF 已保存在 {attach},如你具备文件读取能力,请先阅读该文件再回答]"
+
+    cmd = [str(part).replace("{prompt}", prompt) for part in cmd_template]
+    sessions = load_sessions()
+
+    # 无附加旗标的 harness(如 opencode):把论文复制进会话目录,避免外部目录权限拒绝
+    attach_for_prompt = None
+    if attach_ok and not cont and not conf.get("attach_flag"):
+        try:
+            dst = chat_dir / "paper.pdf"
+            shutil.copyfile(attach, dst)
+            attach_for_prompt = dst
+        except Exception:
+            pass
+    if attach_for_prompt:
+        prompt += f"\n\n[参考资料:论文 PDF 已保存在 {attach_for_prompt},请先阅读该文件再回答]"
+
+    if conf.get("json_flag"):
+        # 支持 --json 的 harness(如 ZCode):服务端真实会话,--resume <sessionId> 精确续接
+        cmd.append(conf["json_flag"])
+        sid = sessions.get(key)
+        if cont and sid:
+            cmd += ["--resume", sid]
+        if attach_ok and not cont and conf.get("attach_flag"):
+            cmd += [conf["attach_flag"], str(attach)]
+    else:
+        if cont and conf.get("continue_flag"):
+            cmd.append(conf["continue_flag"])
+        if attach_ok and not cont and conf.get("attach_flag"):
+            cmd += [conf["attach_flag"], str(attach)]
 
     try:
+        # 净室环境:systemd 会话变量会让 zcode 走 GUI 路径污染输出,最小集已验证为纯 headless
+        # 注意:不要传 TERM——zcode 检测到 TERM 会启动完整 TUI/Electron,无 TERM 才是纯 headless
+        child_env = {
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        }
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=str(chat_dir), env=child_env,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CHAT_TIMEOUT)
     except asyncio.TimeoutError:
         raise HTTPException(504, "AI 回答超时")
+    except FileNotFoundError:
+        raise HTTPException(502, f"未找到 AI 命令行工具「{cmd[0]}」,请先安装并登录,或在配置中切换 harness")
     except Exception as e:
         raise HTTPException(502, f"无法启动 AI CLI: {e}")
     if proc.returncode != 0:
-        raise HTTPException(502, (stderr or b"").decode(errors="replace")[-500:] or "ZCode 运行失败")
-    answer = stdout.decode(errors="replace").strip()
-    if not answer:
+        raise HTTPException(502, (stderr or b"").decode(errors="replace")[-500:] or "AI CLI 运行失败")
+    output = stdout.decode(errors="replace").strip()
+    if not output:
         raise HTTPException(502, "AI 未返回内容")
-    return {"answer": answer, "attached": bool(attach and attach.is_file()), "continued": cont}
+
+    output = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)  # 剥离 ANSI 转义
+    if conf.get("json_flag"):
+        # 解析 --json:输出可能混杂启动日志,从尾部向前找含 response/sessionId 的合法 JSON
+        answer, sid = None, None
+        end = output.rfind("}")
+        while end != -1:
+            start = output.rfind("{", 0, end)
+            if start == -1:
+                break
+            try:
+                data = jsonlib.loads(output[start:end + 1])
+                if "response" in data or "sessionId" in data:
+                    answer = (data.get("response") or "").strip()
+                    sid = data.get("sessionId")
+                    break
+            except Exception:
+                pass
+            end = output.rfind("}", 0, end)
+        if sid:
+            sessions[key] = sid
+            save_sessions(sessions)
+        if not answer:
+            raise HTTPException(502, "AI CLI 输出解析失败: " + output[-200:])
+        return {"answer": answer, "attached": attach_ok, "provider": provider, "sessionId": sid}
+
+    return {"answer": output, "attached": attach_ok, "provider": provider}
 
 
 @app.post("/api/chat/reset")
 def chat_reset(body: dict):
-    """清空某篇论文(或通用)对话:删除其 ZCode 会话目录,下次提问重新开始。"""
+    """清空某篇论文(或通用)对话:删除其会话目录与 sessionId 映射,下次提问重新开始。"""
     key = (body or {}).get("key") or "global"
     d = Path.home() / ".cache" / "pdf-translate-chat" / f"chat-{key}"
     shutil.rmtree(d, ignore_errors=True)
+    sessions = load_sessions()
+    sessions.pop(key, None)
+    save_sessions(sessions)
     return {"ok": True}
+
+
+@app.get("/api/ai/providers")
+def ai_providers():
+    cfg = load_ai_config()
+    return {"current": cfg["provider"], "providers": list(cfg["providers"].keys())}
+
+
+@app.post("/api/ai/provider")
+def set_ai_provider(body: dict):
+    p = (body or {}).get("provider")
+    if not p:
+        raise HTTPException(400, "missing provider")
+    save_ai_provider(p)
+    return {"ok": True, "provider": p}
 
 
 app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")

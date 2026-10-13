@@ -724,6 +724,20 @@ $("#chat-text").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
 
+/* harness 选择 */
+async function loadProviders() {
+  try {
+    const d = await (await fetch("/api/ai/providers")).json();
+    const sel = $("#ai-provider");
+    sel.innerHTML = d.providers.map(p => `<option value="${p}">${p}</option>`).join("");
+    sel.value = d.current;
+    sel.onchange = async () => {
+      await fetch("/api/ai/provider", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: sel.value }) });
+    };
+  } catch {}
+}
+loadProviders();
+
 /* 底部 AI 面板拖拽调高(向上拖变高),双击恢复 */
 (function () {
   const chat = $("#chat"), rz = $("#chat-resize");
