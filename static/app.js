@@ -733,10 +733,31 @@ async function loadProviders() {
     sel.value = d.current;
     sel.onchange = async () => {
       await fetch("/api/ai/provider", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: sel.value }) });
+      await loadModel();
     };
+    await loadModel();
   } catch {}
 }
-loadProviders();
+
+async function loadModel() {
+  const inp = $("#ai-model");
+  try {
+    const d = await (await fetch("/api/ai/model")).json();
+    inp.value = d.model || "";
+    inp.disabled = !d.model && d.provider !== "opencode";
+    inp.title = d.provider === "zcode" ? "zcode 的模型由账号决定,不可切换" : "输入模型名后回车保存";
+  } catch { inp.value = ""; }
+}
+
+$("#ai-model").addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter") return;
+  const v = e.target.value.trim();
+  if (!v) return;
+  e.preventDefault();
+  const r = await fetch("/api/ai/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: v }) });
+  if (!r.ok) alert("保存失败: " + (await r.text()).slice(0, 100));
+  e.target.blur();
+});
 
 /* 底部 AI 面板拖拽调高(向上拖变高),双击恢复 */
 (function () {

@@ -44,21 +44,25 @@ DEFAULT_AI_PROVIDERS = {
     "claude":   {"cmd": ["claude", "-p", "{prompt}"], "continue_flag": "--continue"},
     "codex":    {"cmd": ["codex", "exec", "{prompt}"]},
     "kimicode": {"cmd": ["kimicode", "-p", "{prompt}"]},
-    "opencode": {"cmd": ["/home/xyw/.opencode/bin/opencode", "run", "--model", "opencode/nemotron-3-ultra-free", "{prompt}"], "continue_flag": "--continue"},
+    "opencode": {"cmd": ["/home/xyw/.opencode/bin/opencode", "run", "--model", "{model}", "{prompt}"], "continue_flag": "--continue", "model": "opencode/nemotron-3-ultra-free"},
     "openai":   {"type": "api", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini"},
 }
 AI_DEFAULT_PROVIDER = "zcode"
 
 
 def load_ai_config():
-    cfg = {"provider": AI_DEFAULT_PROVIDER, "providers": dict(DEFAULT_AI_PROVIDERS)}
+    cfg = {"provider": AI_DEFAULT_PROVIDER, "providers": {k: dict(v) for k, v in DEFAULT_AI_PROVIDERS.items()}}
     if AI_CONFIG_FILE.is_file():
         try:
             saved = jsonlib.loads(AI_CONFIG_FILE.read_text())
             if saved.get("provider"):
                 cfg["provider"] = saved["provider"]
             if isinstance(saved.get("providers"), dict):
-                cfg["providers"].update(saved["providers"])
+                for k, v in saved["providers"].items():
+                    if k in cfg["providers"] and isinstance(v, dict):
+                        cfg["providers"][k].update(v)
+                    elif isinstance(v, dict):
+                        cfg["providers"][k] = v
         except Exception:
             pass
     if cfg["provider"] not in cfg["providers"]:
@@ -66,10 +70,14 @@ def load_ai_config():
     return cfg
 
 
+def save_ai_config(cfg):
+    AI_CONFIG_FILE.write_text(jsonlib.dumps(cfg, ensure_ascii=False, indent=2))
+
+
 def save_ai_provider(provider):
     cfg = load_ai_config()
     cfg["provider"] = provider
-    AI_CONFIG_FILE.write_text(jsonlib.dumps({"provider": cfg["provider"]}, ensure_ascii=False, indent=2))
+    save_ai_config(cfg)
 
 
 # ---------- 会话 ID 映射(对话 key -> AI CLI sessionId) ----------
@@ -375,6 +383,8 @@ async def chat(body: dict):
         # 无附加旗标的 harness:告知论文路径,由其自行读取(需具备文件读取能力)
         prompt += f"\n\n[参考资料:论文 PDF 已保存在 {attach},如你具备文件读取能力,请先阅读该文件再回答]"
 
+    if conf.get("model"):
+        cmd_template = [part.replace("{model}", conf["model"]) for part in cmd_template]
     cmd = [str(part).replace("{prompt}", prompt) for part in cmd_template]
     sessions = load_sessions()
 
@@ -472,6 +482,27 @@ def chat_reset(body: dict):
 def ai_providers():
     cfg = load_ai_config()
     return {"current": cfg["provider"], "providers": list(cfg["providers"].keys())}
+
+
+@app.get("/api/ai/model")
+def get_ai_model():
+    cfg = load_ai_config()
+    prov = cfg["provider"]
+    return {"provider": prov, "model": cfg["providers"][prov].get("model")}
+
+
+@app.post("/api/ai/model")
+def set_ai_model(body: dict):
+    model = (body or {}).get("model", "").strip()
+    if not model:
+        raise HTTPException(400, "missing model")
+    cfg = load_ai_config()
+    prov = cfg["provider"]
+    if "model" not in cfg["providers"][prov] and prov != "opencode":
+        raise HTTPException(400, f"harness {prov} 不支持切换模型")
+    cfg["providers"][prov]["model"] = model
+    save_ai_config(cfg)
+    return {"ok": True, "provider": prov, "model": model}
 
 
 @app.post("/api/ai/provider")
