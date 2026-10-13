@@ -547,4 +547,13 @@ def set_ai_provider(body: dict):
     return {"ok": True, "provider": p}
 
 
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    resp = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.endswith((".html", ".js", ".css")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")

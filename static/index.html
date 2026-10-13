@@ -40,6 +40,15 @@
         <button id="zoomout">－</button><span id="zoomval">100%</span><button id="zoomin">＋</button>
       </div>
       <button id="aibtn" class="togglebtn">🤖 AI 问答</button>
+      <select id="ai-provider" class="ai-provider" title="选择 AI harness"></select>
+      <input id="ai-model" class="ai-model" title="模型(回车保存)" placeholder="模型">
+      <select id="ai-variant" class="ai-provider" title="推理强度(空 = 模型默认)">
+        <option value="">默认</option>
+        <option value="minimal">min</option>
+        <option value="low">low</option>
+        <option value="high">high</option>
+        <option value="max">max</option>
+      </select>
       <a id="download" class="dl hidden" download>⬇ 下载</a>
       <div id="hint" class="hint">选中左侧文献打开;阅读时划选文字即可翻译</div>
     </div>
@@ -49,16 +58,7 @@
       <div class="chat-head">
         <span>🤖 AI 问答 <em id="chat-ctx"></em></span>
         <span class="chat-head-right">
-          <select id="ai-provider" class="ai-provider" title="选择 AI harness"></select>
-          <input id="ai-model" class="ai-model" title="模型(回车保存)" placeholder="模型">
-          <select id="ai-variant" class="ai-provider" title="推理强度(空 = 模型默认)">
-            <option value="">推理:默认</option>
-            <option value="minimal">推理:minimal</option>
-            <option value="low">推理:low</option>
-            <option value="high">推理:high</option>
-            <option value="max">推理:max</option>
-          </select>
-          <button id="chat-clear" title="清空当前论文的对话">🧹</button>
+          <button id="chat-clear" title="清空当前论文的对话">🧹 清空对话</button>
           <button id="chat-close">✕</button>
         </span>
       </div>
